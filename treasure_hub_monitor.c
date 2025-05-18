@@ -32,23 +32,77 @@ void write_command_file(const char* command, const char* hunt, const char* id) {
     close(fd);
 }
 
-void start_monitor() {
+void read_from_pipe(int fd) {
+    char buffer[1024];
+    ssize_t n;
+    while ((n = read(fd, buffer, sizeof(buffer)-1)) > 0) {
+        buffer[n] = '\0';
+        printf("%s", buffer);
+    }
+}
+
+// Replace start_monitor with pipe version
+void start_monitor_with_pipe() {
     if (monitor_running) {
         printf("Monitor already running.\n");
         return;
     }
+
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        perror("pipe");
+        return;
+    }
+
     monitor_pid = fork();
     if (monitor_pid == 0) {
+        close(pipefd[0]);
+        char fd_str[10];
+        snprintf(fd_str, sizeof(fd_str), "%d", pipefd[1]);
+        setenv("PIPE_WRITE_FD", fd_str, 1);
         execl("./monitor", "monitor", NULL);
         perror("execl");
         exit(1);
     } else if (monitor_pid > 0) {
+        close(pipefd[1]);
         signal(SIGCHLD, sigchld_handler);
         monitor_running = 1;
         printf("Monitor started with PID %d\n", monitor_pid);
+
+        // Fork reader
+        if (fork() == 0) {
+            read_from_pipe(pipefd[0]);
+            exit(0);
+        }
     } else {
         perror("fork");
     }
+}
+
+void calculate_score() {
+    DIR* d = opendir(".");
+    struct dirent* entry;
+    while ((entry = readdir(d))) {
+        if (entry->d_type == DT_DIR && entry->d_name[0] != '.') {
+            int pipefd[2];
+            if (pipe(pipefd) < 0) continue;
+
+            pid_t pid = fork();
+            if (pid == 0) {
+                close(pipefd[0]);
+                dup2(pipefd[1], STDOUT_FILENO);
+                execl("./score_calculator", "score_calculator", entry->d_name, NULL);
+                perror("execl score_calculator");
+                exit(1);
+            } else {
+                close(pipefd[1]);
+                printf("Score for hunt: %s\n", entry->d_name);
+                read_from_pipe(pipefd[0]);
+                close(pipefd[0]);
+            }
+        }
+    }
+    closedir(d);
 }
 
 void send_signal(int sig) {
@@ -90,6 +144,12 @@ int main() {
                 send_signal(SIGTERM);
                 monitor_running = 0;
             }
+            else if (strcmp(input, "start_monitor") == 0) {
+    start_monitor_with_pipe();
+}
+else if (strcmp(input, "calculate_score") == 0) {
+    calculate_score();
+}
         } else if (strcmp(input, "exit") == 0) {
             if (monitor_running) {
                 printf("Cannot exit while monitor is running. Use stop_monitor first.\n");
